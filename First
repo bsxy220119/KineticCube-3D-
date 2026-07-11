@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraMesh - 3D 手势织面立方体系统</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        /* 1. 摄像头画面置于底层 */
+        #webcam {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 镜像翻转，符合镜面直觉 */
+            z-index: 1;
+        }
+
+        /* 2. Three.js 画布置于上层，背景透明 */
+        #canvas3d {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none; /* 允许点击穿透 */
+        }
+
+        /* 3. 左下角毛玻璃科技感 UI 面板 */
+        #ui-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 12px 20px;
+            border-radius: 8px;
+            color: #fff;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+
+        #ui-panel h1 {
+            margin: 0 0 4px 0;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        #ui-panel p {
+            margin: 0;
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background-color: #ff3b30;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            50% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="canvas3d"></canvas>
+
+    <div id="ui-panel">
+        <h1>AuraMesh v1.0</h1>
+        <p><span class="status-dot" id="status-dot"></span><span id="status-text">正在初始化摄像头...</span></p>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('canvas3d');
+        const statusText = document.getElementById('status-text');
+        const statusDot = document.getElementById('status-dot');
+
+        // ==========================================
+        // 核心一：Three.js 3D 渲染引擎初始化
+        // ==========================================
+        const scene = new THREE.Scene();
+        
+        // 相机配置 (透视投影)
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 5); 
+
+        const renderer = new THREE.WebGLRenderer({ canvas: canvasElement, alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        // 环境光与平行光增强材质立体感
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(0, 5, 5);
+        scene.add(directionalLight);
+
+        // ==========================================
+        // 核心二：多材质网格与拓扑结构定义
+        // ==========================================
+        const colors = [
+            0xff3b30, // 面1: 红色
+            0x34c759, // 面2: 绿色
+            0x007aff, // 面3: 蓝色
+            0xffcc00, // 面4: 黄色
+            0xaf52de, // 面5: 紫色
+            0x5ac8fa  // 面6: 青色
+        ];
+
+        const geometry = new THREE.BufferGeometry();
+        
+        // 10个指尖顶点：0-4为左手(大拇指到小拇指)，5-9为右手(大拇指到小拇指)
+        const positions = new Float32Array(10 * 3); 
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        /* 【拓扑织面算法说明】
+           利用双手10个指尖的离散空间坐标，通过索引（Indices）编织出多面体。
+           每3个索引点构成一个顺时针/逆时针的三角形渲染面。
+        */
+        const indices = [
+            // 侧面柱面缝合 (左手手指对应缝合右手手指)
+            0, 5, 1,   1, 5, 6,  // 大拇指 -> 食指 围成的面
+            1, 6, 2,   2, 6, 7,  // 食指 -> 中指
+            2, 7, 3,   3, 7, 8,  // 中指 -> 无名指
+            3, 8, 4,   4, 8, 9,  // 无名指 -> 小拇指
+            4, 9, 0,   0, 9, 5,  // 小拇指绕回大拇指，实现完全闭合
+
+            // 两端封底面 (将多边形拆分为三角形扇)
+            0, 1, 2,   0, 2, 3,   0, 3, 4,  // 左手掌侧底面
+            5, 6, 7,   5, 7, 8,   5, 8, 9   // 右手掌侧顶面
+        ];
+        geometry.setIndex(indices);
+
+        // 为多面体的不同表面划分材质组（实现渐变多色视觉）
+        geometry.addGroup(0, 6, 0);   // 材质1
+        geometry.addGroup(6, 6, 1);   // 材质2
+        geometry.addGroup(12, 6, 2);  // 材质3
+        geometry.addGroup(18, 6, 3);  // 材质4
+        geometry.addGroup(24, 6, 4);  // 材质5
+        geometry.addGroup(30, 18, 5); // 顶底两面合用材质6
+
+        // 批量创建半透明发光材质
+        const materials = colors.map(color => new THREE.MeshStandardMaterial({
+            color: color,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.6,
+            roughness: 0.3,
+            metalness: 0.1
+        }));
+
+        const cubeMesh = new THREE.Mesh(geometry, materials);
+        scene.add(cubeMesh);
+
+        // 实体外侧叠加白色科技感线框（棱线）
+        const wireframeMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.8
+        });
+        const cubeWireframe = new THREE.Mesh(geometry, wireframeMaterial);
+        scene.add(cubeWireframe);
+
+
+        // ==========================================
+        // 核心三：MediaPipe 实时手势追踪与坐标转换
+        // ==========================================
+        const tipIds = [4, 8, 12, 16, 20]; // 大拇指、食指、中指、无名指、小拇指的指尖 Landmark 编号
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                let leftHand = null;
+                let rightHand = null;
+
+                // 遍历识别结果，精准区分左右手
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const label = results.multiHandedness[i].label; 
+                    if (label === 'Left') leftHand = results.multiHandLandmarks[i];
+                    if (label === 'Right') rightHand = results.multiHandLandmarks[i];
+                }
+
+                // 当且仅当双手同时在视野内时，触发立体编织
+                if (leftHand && rightHand) {
+                    statusText.innerText = "时空网格追踪中...";
+                    statusDot.style.backgroundColor = "#34c759";
+
+                    const positionAttribute = geometry.attributes.position;
+
+                    // 1. 映射并转换左手 5 个指尖坐标 (顶点 0 - 4)
+                    tipIds.forEach((id, index) => {
+                        const lm = leftHand[id];
+                        // 算法：将 MediaPipe 的 [0,1] 归一化屏幕坐标转换为 Three.js 的 [-X, +X] 3D 真实世界空间坐标
+                        positionAttribute.setXYZ(
+                            index, 
+                            -(lm.x - 0.5) * 4, 
+                            -(lm.y - 0.5) * 3, 
+                            -lm.z * 5 // Z 轴引入深度传感
+                        );
+                    });
+
+                    // 2. 映射并转换右手 5 个指尖坐标 (顶点 5 - 9)
+                    tipIds.forEach((id, index) => {
+                        const lm = rightHand[id];
+                        positionAttribute.setXYZ(
+                            index + 5, 
+                            -(lm.x - 0.5) * 4, 
+                            -(lm.y - 0.5) * 3, 
+                            -lm.z * 5
+                        );
+                    });
+
+                    // 动态更新 3D 缓冲区数据，并重新计算法线保证光影实时渲染正确
+                    positionAttribute.needsUpdate = true;
+                    geometry.computeVertexNormals(); 
+                    
+                    cubeMesh.visible = true;
+                    cubeWireframe.visible = true;
+                } else {
+                    statusText.innerText = "等待双手建立拓扑连接...";
+                    statusDot.style.backgroundColor = "#ffcc00";
+                }
+            } else {
+                statusText.innerText = "未捕获到手势视觉信号...";
+                statusDot.style.backgroundColor = "#ff3b30";
+            }
+
+            // 执行单帧渲染
+            renderer.render(scene, camera);
+        }
+
+        // 初始化 MediaPipe 实例
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+        hands.onResults(onResults);
+
+        // 启动摄像头数据流捕获
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 1280,
+            height: 720
+        });
+        
+        cameraUtils.start().then(() => {
+            statusText.innerText = "请同时挥动双手...";
+            statusDot.style.backgroundColor = "#ffcc00";
+        });
+
+        // 弹性布局：响应窗口尺寸缩放
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
